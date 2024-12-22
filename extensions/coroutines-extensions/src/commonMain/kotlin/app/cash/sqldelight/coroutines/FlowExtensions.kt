@@ -1,5 +1,6 @@
 /*
  * Copyright (C) 2018 Square, Inc.
+ * Copyright (C) 2024 Uli Bubenheimer
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -24,33 +25,35 @@ import app.cash.sqldelight.async.coroutines.awaitAsOne
 import app.cash.sqldelight.async.coroutines.awaitAsOneOrNull
 import kotlin.coroutines.CoroutineContext
 import kotlin.jvm.JvmName
-import kotlinx.coroutines.channels.Channel
-import kotlinx.coroutines.channels.Channel.Factory.CONFLATED
+import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.flow.Flow
-import kotlinx.coroutines.flow.flow
+import kotlinx.coroutines.flow.callbackFlow
+import kotlinx.coroutines.flow.conflate
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.mapNotNull
+import kotlinx.coroutines.flow.shareIn
 import kotlinx.coroutines.withContext
 
-/** Turns this [Query] into a [Flow] which emits whenever the underlying result set changes. */
+/**
+ * Turns this [Query] into a [Flow] which emits whenever the underlying result set changes.
+ *
+ * This flow operator is modified from its original implementation:
+ * 1. Conflated buffer is subject to operator/buffer fusion; conflation overrides any other fused
+ * buffer specification. This facilitates usage with [shareIn].
+ * 2. Suspends initially as an unfortunate consequence of using [callbackFlow].
+ */
 @JvmName("toFlow")
-fun <T : Any> Query<T>.asFlow(): Flow<Query<T>> = flow {
-  val channel = Channel<Unit>(CONFLATED)
-  channel.trySend(Unit)
+fun <T : Any> Query<T>.asFlow(): Flow<Query<T>> = callbackFlow {
+  channel.send(this@asFlow)
 
   val listener = Query.Listener {
-    channel.trySend(Unit)
+    channel.trySend(this@asFlow).getOrThrow() // should never throw
   }
 
   addListener(listener)
-  try {
-    for (item in channel) {
-      emit(this@asFlow)
-    }
-  } finally {
-    removeListener(listener)
-  }
-}
+
+  awaitClose { removeListener(listener) }
+}.conflate()
 
 fun <T : Any> Flow<Query<T>>.mapToOne(
   context: CoroutineContext,
